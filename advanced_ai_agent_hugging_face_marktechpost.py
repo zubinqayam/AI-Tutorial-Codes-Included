@@ -7,17 +7,14 @@ Original file is located at
     https://colab.research.google.com/drive/1A2KBtqZA20Hyo4QNYThD0Xk7fY2QiIHy
 """
 
-!pip install transformers torch accelerate datasets requests beautifulsoup4
+# !pip install transformers torch accelerate datasets requests beautifulsoup4
 
 import torch
 import json
-import requests
 from datetime import datetime
 from transformers import (
-    AutoTokenizer, AutoModelForCausalLM, AutoModelForSequenceClassification,
-    AutoModelForQuestionAnswering, pipeline
+    AutoTokenizer, AutoModelForCausalLM, pipeline
 )
-from bs4 import BeautifulSoup
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -27,7 +24,11 @@ class AdvancedAIAgent:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"🚀 Initializing AI Agent on {self.device}")
 
-        self._load_models()
+        # Lazy initialization
+        self.gen_tokenizer = None
+        self.gen_model = None
+        self.sentiment_pipeline = None
+        self.qa_pipeline = None
 
         self.tools = {
             "web_search": self.web_search,
@@ -36,52 +37,64 @@ class AdvancedAIAgent:
             "sentiment": self.analyze_sentiment
         }
 
-        print("✅ AI Agent initialized successfully!")
+        print("✅ AI Agent initialized successfully! (Models will be loaded on demand)")
 
-    def _load_models(self):
-        """Load all required models"""
-        print("📥 Loading models...")
+    def _get_gen_model(self):
+        """Lazy load generation model"""
+        if self.gen_model is None:
+            print("📥 Loading generation model...")
+            self.gen_tokenizer = AutoTokenizer.from_pretrained("microsoft/DialoGPT-medium")
+            self.gen_model = AutoModelForCausalLM.from_pretrained("microsoft/DialoGPT-medium")
+            self.gen_tokenizer.pad_token = self.gen_tokenizer.eos_token
+        return self.gen_model, self.gen_tokenizer
 
-        self.gen_tokenizer = AutoTokenizer.from_pretrained("microsoft/DialoGPT-medium")
-        self.gen_model = AutoModelForCausalLM.from_pretrained("microsoft/DialoGPT-medium")
-        self.gen_tokenizer.pad_token = self.gen_tokenizer.eos_token
+    def _get_sentiment_pipeline(self):
+        """Lazy load sentiment pipeline"""
+        if self.sentiment_pipeline is None:
+            print("📥 Loading sentiment model...")
+            self.sentiment_pipeline = pipeline(
+                "sentiment-analysis",
+                model="cardiffnlp/twitter-roberta-base-sentiment-latest",
+                device=0 if self.device == "cuda" else -1
+            )
+        return self.sentiment_pipeline
 
-        self.sentiment_pipeline = pipeline(
-            "sentiment-analysis",
-            model="cardiffnlp/twitter-roberta-base-sentiment-latest",
-            device=0 if self.device == "cuda" else -1
-        )
-
-        self.qa_pipeline = pipeline(
-            "question-answering",
-            model="distilbert-base-cased-distilled-squad",
-            device=0 if self.device == "cuda" else -1
-        )
-
-        print("✅ All models loaded!")
+    def _get_qa_pipeline(self):
+        """Lazy load QA pipeline"""
+        if self.qa_pipeline is None:
+            print("📥 Loading QA model...")
+            self.qa_pipeline = pipeline(
+                "question-answering",
+                model="distilbert-base-cased-distilled-squad",
+                device=0 if self.device == "cuda" else -1
+            )
+        return self.qa_pipeline
 
     def generate_response(self, prompt, max_length=100, temperature=0.7):
         """Generate text response using the language model"""
-        inputs = self.gen_tokenizer.encode(prompt + self.gen_tokenizer.eos_token,
+        gen_model, gen_tokenizer = self._get_gen_model()
+
+        inputs = gen_tokenizer.encode(prompt + gen_tokenizer.eos_token,
                                          return_tensors='pt')
 
         with torch.no_grad():
-            outputs = self.gen_model.generate(
+            outputs = gen_model.generate(
                 inputs,
                 max_length=max_length,
                 temperature=temperature,
                 do_sample=True,
-                pad_token_id=self.gen_tokenizer.eos_token_id,
+                pad_token_id=gen_tokenizer.eos_token_id,
                 attention_mask=torch.ones_like(inputs)
             )
 
-        response = self.gen_tokenizer.decode(outputs[0][len(inputs[0]):],
+        response = gen_tokenizer.decode(outputs[0][len(inputs[0]):],
                                            skip_special_tokens=True)
         return response.strip()
 
     def analyze_sentiment(self, text):
         """Analyze sentiment of given text"""
-        result = self.sentiment_pipeline(text)[0]
+        sentiment_pipeline = self._get_sentiment_pipeline()
+        result = sentiment_pipeline(text)[0]
         return {
             "sentiment": result['label'],
             "confidence": round(result['score'], 4),
@@ -90,7 +103,8 @@ class AdvancedAIAgent:
 
     def answer_question(self, question, context):
         """Answer questions based on given context"""
-        result = self.qa_pipeline(question=question, context=context)
+        qa_pipeline = self._get_qa_pipeline()
+        result = qa_pipeline(question=question, context=context)
         return {
             "answer": result['answer'],
             "confidence": round(result['score'], 4),
